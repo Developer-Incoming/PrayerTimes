@@ -200,3 +200,39 @@ Configure the following secrets in **Repository Settings → Secrets and variabl
 3. **App Store Connect API Key (`.p8`)**:
    In [App Store Connect](https://appstoreconnect.apple.com/) → **Users and Access** → **Integrations** → **App Store Connect API**, generate a key with the **Developer** or **App Manager** role.
 
+---
+
+## Sideloading (No Apple Developer Account Required)
+
+If you do not have a paid Apple Developer Account, you can build and download a ready-to-sideload `.ipa` file using [`.github/workflows/build-ipa.yml`](.github/workflows/build-ipa.yml).
+
+### How to Get the `.ipa` from GitHub Actions:
+1. Push your code to GitHub (or go to your repository on GitHub).
+2. Click the **Actions** tab at the top.
+3. Select **Build Sideloadable IPA** from the left sidebar.
+4. Click **Run workflow** (or select the latest completed run).
+5. Once the job completes, scroll down to the **Artifacts** section at the bottom of the page.
+6. Click **`PrayerTimes-Sideloadable-IPA`** to download the zip file.
+7. Unzip the file on your computer to obtain `PrayerTimes.ipa`.
+
+### How to Install on iPad or iPhone:
+You can sign and install `PrayerTimes.ipa` with a free personal Apple ID using any popular sideloading tool:
+
+* **[Sideloadly](https://sideloadly.io/) (Windows & Mac)**:
+  1. Connect your iPhone/iPad to your computer via USB or Wi-Fi.
+  2. Open Sideloadly and drag `PrayerTimes.ipa` into the window.
+  3. Enter your free personal Apple ID email and password (used only to generate the free 7-day provisioning certificate).
+  4. Click **Start** to install the app onto your device.
+* **[AltStore](https://altstore.io/) / [SideStore](https://sidestore.io/)**:
+  1. Open AltStore or SideStore on your device.
+  2. Go to **My Apps**, tap the `+` button in the top corner.
+  3. Select `PrayerTimes.ipa` to install.
+* **[TrollStore](https://github.com/opa334/TrollStore) (iOS 14.0 – 16.6.1 / 17.0)**:
+  1. AirDrop or download `PrayerTimes.ipa` directly to your device.
+  2. Share/open with TrollStore for permanent, revoke-free installation without signing.
+
+#### First-Time Sideloading Setup on iOS 16, 17, and 18:
+1. **Enable Developer Mode**: On your iOS device, go to **Settings → Privacy & Security → Developer Mode** and toggle it **On** (restart device when prompted).
+2. **Trust Your Certificate**: Go to **Settings → General → VPN & Device Management**, tap your personal Apple ID under *Developer App*, and tap **Trust**.
+
+
