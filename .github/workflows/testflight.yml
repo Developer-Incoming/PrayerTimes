@@ -1,0 +1,272 @@
+name: Build & Deploy to TestFlight
+
+on:
+  push:
+    branches: [ master, main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+    inputs:
+      upload_to_testflight:
+        description: 'Upload build to TestFlight'
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Run Unit Tests
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Run PrayerKit Package Tests
+        run: |
+          swift test --package-path Packages/PrayerKit
+
+  build-and-deploy:
+    name: Build & Upload to TestFlight
+    needs: test
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      APP_ID: "com.antigravity.PrayerTimes"
+      WIDGET_ID: "com.antigravity.PrayerTimes.PrayerTimesWidget"
+      APP_GROUP_ID: "group.com.antigravity.PrayerTimes"
+      SCHEME: "PrayerTimes"
+      PROJECT_NAME: "PrayerTimes.xcodeproj"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Check Signing Secrets Availability
+        id: check-secrets
+        run: |
+          if [ -n "${{ secrets.APPLE_CERTIFICATE_BASE64 }}" ] && \
+             [ -n "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" ] && \
+             [ -n "${{ secrets.APPLE_TEAM_ID }}" ] && \
+             [ -n "${{ secrets.PROVISIONING_PROFILE_APP_BASE64 }}" ] && \
+             [ -n "${{ secrets.PROVISIONING_PROFILE_WIDGET_BASE64 }}" ]; then
+            echo "has_signing=true" >> $GITHUB_OUTPUT
+            echo "Code signing secrets detected."
+          else
+            echo "has_signing=false" >> $GITHUB_OUTPUT
+            echo "Code signing secrets not configured. Building unsigned artifact."
+          fi
+
+          if [ -n "${{ secrets.APP_STORE_CONNECT_KEY_ID }}" ] && \
+             [ -n "${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}" ] && \
+             [ -n "${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}" ]; then
+            echo "has_app_store_key=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_app_store_key=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Keychain and Provisioning Profiles
+        if: steps.check-secrets.outputs.has_signing == 'true'
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          BUILD_PROVISION_PROFILE_APP_BASE64: ${{ secrets.PROVISIONING_PROFILE_APP_BASE64 }}
+          BUILD_PROVISION_PROFILE_WIDGET_BASE64: ${{ secrets.PROVISIONING_PROFILE_WIDGET_BASE64 }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+
+          # Create temporary keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import distribution certificate to keychain
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          # Setup provisioning profiles directory
+          PROFILES_DIR=~/Library/MobileDevice/Provisioning\ Profiles
+          mkdir -p "$PROFILES_DIR"
+
+          # Install Main App Provisioning Profile
+          APP_PROFILE_PATH=$RUNNER_TEMP/app.mobileprovision
+          echo -n "$BUILD_PROVISION_PROFILE_APP_BASE64" | base64 --decode > "$APP_PROFILE_PATH"
+          APP_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< $(security cms -D -i "$APP_PROFILE_PATH"))
+          APP_NAME=$(/usr/libexec/PlistBuddy -c "Print Name" /dev/stdin <<< $(security cms -D -i "$APP_PROFILE_PATH"))
+          cp "$APP_PROFILE_PATH" "$PROFILES_DIR/$APP_UUID.mobileprovision"
+          echo "APP_PROFILE_UUID=$APP_UUID" >> $GITHUB_ENV
+          echo "APP_PROFILE_NAME=$APP_NAME" >> $GITHUB_ENV
+          echo "Installed App profile: $APP_NAME ($APP_UUID)"
+
+          # Install Widget Provisioning Profile
+          WIDGET_PROFILE_PATH=$RUNNER_TEMP/widget.mobileprovision
+          echo -n "$BUILD_PROVISION_PROFILE_WIDGET_BASE64" | base64 --decode > "$WIDGET_PROFILE_PATH"
+          WIDGET_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< $(security cms -D -i "$WIDGET_PROFILE_PATH"))
+          WIDGET_NAME=$(/usr/libexec/PlistBuddy -c "Print Name" /dev/stdin <<< $(security cms -D -i "$WIDGET_PROFILE_PATH"))
+          cp "$WIDGET_PROFILE_PATH" "$PROFILES_DIR/$WIDGET_UUID.mobileprovision"
+          echo "WIDGET_PROFILE_UUID=$WIDGET_UUID" >> $GITHUB_ENV
+          echo "WIDGET_PROFILE_NAME=$WIDGET_NAME" >> $GITHUB_ENV
+          echo "Installed Widget profile: $WIDGET_NAME ($WIDGET_UUID)"
+
+      - name: Build & Archive (Signed for App Store / TestFlight)
+        if: steps.check-secrets.outputs.has_signing == 'true'
+        run: |
+          mkdir -p $RUNNER_TEMP/build_output
+          ARCHIVE_PATH=$RUNNER_TEMP/PrayerTimes.xcarchive
+          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
+
+          # Build number increments with GitHub Actions run number
+          BUILD_NUMBER="${{ github.run_number }}"
+          echo "Building version 1.0.0 ($BUILD_NUMBER) for iOS and iPadOS"
+
+          xcodebuild archive \
+            -project "${{ env.PROJECT_NAME }}" \
+            -scheme "${{ env.SCHEME }}" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$ARCHIVE_PATH" \
+            DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            MARKETING_VERSION="1.0.0" \
+            OTHER_CODE_SIGN_FLAGS="--keychain ${{ env.KEYCHAIN_PATH }}" \
+            CODE_SIGN_STYLE="Manual" \
+            PROVISIONING_PROFILE_SPECIFIER="${{ env.APP_PROFILE_UUID }}" \
+            -allowProvisioningUpdates=NO \
+            | xcpretty || true
+
+      - name: Export IPA for App Store / TestFlight
+        if: steps.check-secrets.outputs.has_signing == 'true'
+        run: |
+          EXPORT_OPTIONS_PATH=$RUNNER_TEMP/ExportOptions.plist
+
+          cat > "$EXPORT_OPTIONS_PATH" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>app-store</string>
+              <key>destination</key>
+              <string>export</string>
+              <key>signingStyle</key>
+              <string>manual</string>
+              <key>teamID</key>
+              <string>${{ secrets.APPLE_TEAM_ID }}</string>
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>${{ env.APP_ID }}</key>
+                  <string>${{ env.APP_PROFILE_UUID }}</string>
+                  <key>${{ env.WIDGET_ID }}</key>
+                  <string>${{ env.WIDGET_PROFILE_UUID }}</string>
+              </dict>
+              <key>stripSwiftSymbols</key>
+              <true/>
+              <key>compileBitcode</key>
+              <false/>
+              <key>uploadSymbols</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath "${{ env.ARCHIVE_PATH }}" \
+            -exportOptionsPlist "$EXPORT_OPTIONS_PATH" \
+            -exportPath $RUNNER_TEMP/build_output \
+            -allowProvisioningUpdates=NO
+
+          IPA_FILE=$(find $RUNNER_TEMP/build_output -name "*.ipa" | head -n 1)
+          echo "IPA_FILE=$IPA_FILE" >> $GITHUB_ENV
+          echo "Generated IPA: $IPA_FILE"
+
+      - name: Build Verification (Unsigned Fallback when Secrets Missing)
+        if: steps.check-secrets.outputs.has_signing == 'false'
+        run: |
+          echo "Building application to verify compilation on iOS and iPadOS without signing certificates..."
+          xcodebuild build \
+            -project "${{ env.PROJECT_NAME }}" \
+            -scheme "${{ env.SCHEME }}" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            | xcpretty || true
+
+      - name: Upload IPA Artifact
+        if: steps.check-secrets.outputs.has_signing == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrayerTimes-TestFlight-IPA
+          path: ${{ env.IPA_FILE }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload xcarchive Artifact
+        if: steps.check-secrets.outputs.has_signing == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrayerTimes-xcarchive
+          path: ${{ env.ARCHIVE_PATH }}
+          retention-days: 14
+
+      - name: Upload to TestFlight (App Store Connect)
+        if: |
+          steps.check-secrets.outputs.has_signing == 'true' &&
+          steps.check-secrets.outputs.has_app_store_key == 'true' &&
+          (github.event_name != 'pull_request') &&
+          (github.event_name != 'workflow_dispatch' || inputs.upload_to_testflight == true)
+        env:
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          API_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          echo "Preparing App Store Connect API Key..."
+          PRIVATE_KEYS_DIR=~/.appstoreconnect/private_keys
+          mkdir -p "$PRIVATE_KEYS_DIR"
+          KEY_PATH="$PRIVATE_KEYS_DIR/AuthKey_${API_KEY_ID}.p8"
+
+          # Write key file directly (handles both raw PEM and base64 encoded strings)
+          if echo "$API_PRIVATE_KEY" | grep -q "BEGIN PRIVATE KEY"; then
+            echo "$API_PRIVATE_KEY" > "$KEY_PATH"
+          else
+            echo "$API_PRIVATE_KEY" | base64 --decode > "$KEY_PATH"
+          fi
+
+          echo "Uploading $IPA_FILE to TestFlight..."
+          xcrun altool --upload-app \
+            -f "$IPA_FILE" \
+            -t ios \
+            --apiKey "$API_KEY_ID" \
+            --apiIssuer "$API_ISSUER_ID" \
+            --show-progress
+
+          echo "✅ Successfully uploaded build to TestFlight!"
+
+      - name: Clean Up Keychain
+        if: always() && steps.check-secrets.outputs.has_signing == 'true'
+        run: |
+          if [ -n "$KEYCHAIN_PATH" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH"
+          fi

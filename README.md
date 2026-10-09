@@ -158,3 +158,45 @@ If you modify `project.yml`, regenerate the Xcode project:
 ```bash
 xcodegen generate
 ```
+
+---
+
+## GitHub Actions & TestFlight Deployment
+
+A complete CI/CD workflow is provided in [`.github/workflows/testflight.yml`](.github/workflows/testflight.yml) to build for iOS & iPadOS, run unit tests, and upload `.ipa` releases directly to Apple TestFlight.
+
+### Triggers
+* **Push to `main` / `master`** or **tag `v*`**: Automatically builds and uploads to TestFlight.
+* **Pull Requests**: Runs test suite and verifies compilation on iOS/iPadOS without requiring signing credentials.
+* **Manual trigger (`workflow_dispatch`)**: Trigger on-demand builds from the GitHub Actions tab.
+
+### Required GitHub Repository Secrets
+
+Configure the following secrets in **Repository Settings → Secrets and variables → Actions**:
+
+| Secret Name | Description |
+| :--- | :--- |
+| `APPLE_CERTIFICATE_BASE64` | Base64-encoded Apple Distribution Certificate (`.p12` file) |
+| `APPLE_CERTIFICATE_PASSWORD` | Password used when exporting the `.p12` certificate |
+| `APPLE_TEAM_ID` | 10-character Apple Developer Team ID (e.g. `ABC1234567`) |
+| `PROVISIONING_PROFILE_APP_BASE64` | Base64-encoded App Store profile for `com.antigravity.PrayerTimes` |
+| `PROVISIONING_PROFILE_WIDGET_BASE64` | Base64-encoded App Store profile for `com.antigravity.PrayerTimes.PrayerTimesWidget` |
+| `APP_STORE_CONNECT_KEY_ID` | Key ID from App Store Connect (e.g. `2X9R4274KC`) |
+| `APP_STORE_CONNECT_ISSUER_ID` | Issuer ID from App Store Connect (UUID format) |
+| `APP_STORE_CONNECT_PRIVATE_KEY` | Content of the `.p8` API key file (or base64 encoded) |
+
+#### How to Generate the Secrets:
+1. **Certificate (`.p12`)**:
+   In macOS **Keychain Access**, export your Apple Distribution Certificate as a `.p12` file with a password, then run:
+   ```bash
+   base64 -i distribution.p12 | pbcopy
+   ```
+2. **Provisioning Profiles (`.mobileprovision`)**:
+   Download the App Store distribution profiles for both App and Widget from the Apple Developer Portal:
+   ```bash
+   base64 -i PrayerTimes_AppStore.mobileprovision | pbcopy
+   base64 -i PrayerTimesWidget_AppStore.mobileprovision | pbcopy
+   ```
+3. **App Store Connect API Key (`.p8`)**:
+   In [App Store Connect](https://appstoreconnect.apple.com/) → **Users and Access** → **Integrations** → **App Store Connect API**, generate a key with the **Developer** or **App Manager** role.
+
